@@ -7,9 +7,7 @@ import random
 from optparse import OptionParser
 import sys
 from distutils.util import strtobool
-
-timesteps = 17
-features = 513
+from options import get_opt
 
 
 def user_query(question):
@@ -21,13 +19,15 @@ def user_query(question):
             print('Please respond with \'y\' or \'n\'.\n')
 
 class FeatureExtraction():
-    def __init__(self, dataset_dir, instruments):
+    def __init__(self, opt, instruments):
         self.instr = instruments
-        self.dataset_dir = dataset_dir
-        self.n_fft = 1024
+        self.dataset_dir = opt['d_path']
+        self.n_fft = opt['n_fft']
         self.song_dir = []
-        for x in os.listdir(dataset_dir):
-            xdir = os.listdir(dataset_dir + '/' + x)
+        self.timesteps = opt['timesteps']
+        self.features = opt['features']
+        for x in os.listdir(self.dataset_dir):
+            xdir = os.listdir(self.dataset_dir + '/' + x)
             # check if song has a file that contains mix and the
             # 2 instruments that the features will be calculated
             # for
@@ -47,13 +47,17 @@ class FeatureExtraction():
         self.valid_list = self.song_dir[int(3*len(self.song_dir)/4 + 1):
                                         len(self.song_dir) - 1]
         if os.path.isfile('train_data.hdf5'):
-            if user_query(('Train hdf5 file already exists. Do you want to'
+            if user_query(('hdf5 data files already exist. Do you want to'
                           ' overwrite?')):
                             self.train_h5 = h5py.File('train_data.hdf5', 'w')
                             self.test_h5 = h5py.File('test_data.hdf5', 'w')
                             self.valid_h5 = h5py.File('valid_data.hdf5', 'w')
             else:
                 sys.exit('No overwrite')
+        else:
+            self.train_h5 = h5py.File('train_data.hdf5', 'w')
+            self.test_h5 = h5py.File('test_data.hdf5', 'w')
+            self.valid_h5 = h5py.File('valid_data.hdf5', 'w')
         self.train_num = 0
         self.test_num = 0
         self.valid_num = 0
@@ -72,23 +76,24 @@ class FeatureExtraction():
                 if 'mix' in file and mix is False:
                     mix = True
                     S, sr_ = self.get_data(file_path)
-                    S = np.reshape(S, (-1, timesteps, features))
-                    num += S.shape[0]
-                    grp['mix'] = S
+                    conc = np.hstack((S.real, S.imag))
+                    conc = np.reshape(conc, (-1, self.timesteps, self.features))
+                    num += conc.shape[0]
+                    grp['mix'] = conc
                 if self.instr[0] in file and instr1 is False:
                     print file
                     instr1 = True
                     S, sr_ = self.get_data(file_path)
-                    S = np.reshape(S, (-1, timesteps, features))
-                    num += S.shape[0]
-                    grp[self.instr[0]] = S
+                    conc = np.hstack((S.real, S.imag))
+                    conc = np.reshape(conc, (-1, self.timesteps, self.features))
+                    grp[self.instr[0]] = conc
                 if self.instr[1] in file and instr2 is False:
                     print file
                     instr2 = True
                     S, sr_ = self.get_data(file_path)
-                    S = np.reshape(S, (-1, timesteps, features))
-                    num += S.shape[0]
-                    grp[self.instr[1]] = S
+                    conc = np.hstack((S.real, S.imag))
+                    conc = np.reshape(conc, (-1, self.timesteps, self.features))
+                    grp[self.instr[1]] = conc
         return num
 
     def write_h5s(self):
@@ -111,6 +116,7 @@ class FeatureExtraction():
         S = librosa.core.stft(y=y, n_fft=self.n_fft).transpose()
         return S, sr_
 
+
 def option_callback(option, opt, value, parse):
     setattr(parse.values, option.dest, value.split(','))
 
@@ -121,5 +127,5 @@ if __name__ == '__main__':
     (options, args) = parse.parse_args()
     if len(options.instruments) != 2:
         sys.exit('2 instruments must be defined using -i option.')
-    path = '/home/alexhepburn/Documents/Datasets/Separation dataset/'
-    f = FeatureExtraction(path, options.instruments)
+    opt = get_opt()
+    f = FeatureExtraction(opt, options.instruments)

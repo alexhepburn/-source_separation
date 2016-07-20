@@ -9,6 +9,10 @@ from keras.callbacks import ModelCheckpoint  # , EarlyStopping
 import h5py
 import librosa
 from optparse import OptionParser
+from options import get_opt
+from scipy import io
+import sys
+
 
 class Source_Separation_LSTM():
     """Class that separates instruments from a mixture using LSTM."""
@@ -35,13 +39,13 @@ class Source_Separation_LSTM():
         diff = mean_squared_error(out2_pred, self.out1_true)
         return mse - self.gamma * diff
 
-    def fit(self, input, out1_true, out2_true, epoch, batch_size_, valid_in,
-            valid_out):
+    def fit(self, input, out1_true, out2_true, valid_in, valid_out):
         """Train neural network given input data and corresponding output."""
         self.out1_true = out1_true
         self.out2_true = out2_true
-        self.model.fit(input, [out1_true, out2_true], nb_epoch=epoch,
-                       batch_size=batch_size_, callbacks=[self.checkpointer],
+        self.model.fit(input, [out1_true, out2_true], nb_epoch=self.epoch,
+                       batch_size=self.batch_size,
+                       callbacks=[self.checkpointer],
                        validation_data=(valid_in, valid_out))
 
     def predict(self, test, batch_size):
@@ -53,52 +57,74 @@ class Source_Separation_LSTM():
         """Load weights from saved weights file in hdf5."""
         self.model.load_weights(path)
 
-    def __init__(self, timesteps, features):
+    def __init__(self, options):
         """Initialise network structure."""
-        self.timesteps = timesteps
-        self.features = features
+        self.timesteps = options['timesteps']
+        self.features = options['features']
         self.out1_true = 0
         self.out2_true = 0
-        self.gamma = 0.5
-        mix = Input(batch_shape=(None, timesteps, features))
-        self.conv = Convolution1D(513, 3, border_mode='same')(mix)
-        self.lstm = LSTM(features, return_sequences=True)(self.conv)
-        self.lstm2 = LSTM(features, return_sequences=True)(self.lstm)
-        self.lstm2_drop = Dropout(0.25)(self.lstm2)
-        self.out1 = TimeDistributed(Dense(features,
+        self.gamma = options['gamma']
+        self.drop = options['dropout']
+        self.conv_masks = options['conv_masks']
+        self.plot = options['plot']
+        self.epoch = options['epoch']
+        self.batch_size = options['batch_size']
+        self.mix = Input(batch_shape=(None, self.timesteps, self.features),
+                         dtype='float32')
+        self.conv = Convolution1D(self.features, self.conv_masks,
+                                  border_mode='same')(self.mix)
+        self.lstm = LSTM(self.features, return_sequences=True)(self.conv)
+        self.lstm2 = LSTM(self.features, return_sequences=True)(self.lstm)
+        self.lstm2_drop = Dropout(self.drop)(self.lstm2)
+        self.out1 = TimeDistributed(Dense(self.features,
                                           activation='relu'))(self.lstm2_drop)
-        self.out2 = TimeDistributed(Dense(features,
+        self.out2 = TimeDistributed(Dense(self.features,
                                           activation='relu'))(self.lstm2_drop)
 
-        self.model = Model(input=[mix], output=[self.out1, self.out2])
+        self.model = Model(input=[self.mix], output=[self.out1, self.out2])
         self.model.compile(loss=[self.objective_1, self.objective_2],
-                           optimizer='rmsprop')
-        # plot(self.model, to_file='model.png')
+                           optimizer='SGD')
+        if self.plot:
+            plot(self.model, to_file='model.png')
         # Save best weights to hdf5 file
         self.checkpointer = ModelCheckpoint(filepath="weights.hdf5", verbose=1,
                                             save_best_only=True)
 
 
-def h5_to_matrix(h5_file):
-    with h5py.File(h5_file, 'r') as f:
-        song_names = f.keys()[:]
-        num = np.array(f.get('count'))
-        instr_names = f[song_names[0]].keys()
-        del instr_names[instr_names.index('mix')]
-        mixture = np.zeros((num, 17, 513), dtype=np.complex64)
-        instr1 = np.zeros((num, 17, 513), dtype=np.complex64)
-        instr2 = np.zeros((num, 17, 513), dtype=np.complex64)
-        start = 0
-        for song in song_names:
-            if isinstance(f[song], h5py.Group) is True:
-                end = start + np.array(f[song]['mix']).shape[0]
-                mixture[start:end, :, :] = np.array(f[song]['mix'])
-                print 'Instrument 1: {}'.format(instr_names[0])
-                print 'Instrument 2: {}'.format(instr_names[1])
-                instr1[start:end, :, :] = np.array(f[song][instr_names[0]])
-                instr2[start:end, :, :] = np.array(f[song][instr_names[1]])
-                start = end
-    return mixture, instr1, instr2
+    def h5_to_matrix(self, h5_file):
+        with h5py.File(h5_file, 'r') as f:
+            song_names = f.keys()[:]
+            del song_names[song_names.index('count')]
+            num = np.array(f.get('count'))
+            instr_names = f[song_names[0]].keys()
+            del instr_names[instr_names.index('mix')]
+            mixture = np.zeros((num, self.timesteps, self.features),
+                               dtype=np.float32)
+            instr1 = np.zeros((num, self.timesteps, self.features),
+                              dtype=np.float32)
+            instr2 = np.zeros((num, self.timesteps, self.features),
+                              dtype=np.float32)
+            start = 0
+            for song in song_names:
+                if isinstance(f[song], h5py.Group) is True:
+                    end = start + np.array(f[song]['mix']).shape[0]
+                    mixture[start:end, :, :] = np.array(f[song]['mix'])
+                    print 'Instrument 1: {}'.format(instr_names[0])
+                    print 'Instrument 2: {}'.format(instr_names[1])
+                    instr1[start:end, :, :] = np.array(f[song][instr_names[0]])
+                    instr2[start:end, :, :] = np.array(f[song][instr_names[1]])
+                    start = end
+        return mixture, instr1, instr2
+
+
+    def conc_to_complex(self, matrix):
+        """Turn matrix in form [real, complex] to compelx number."""
+        split = self.features/2
+        end = matrix.shape[0]
+        real = matrix[0:split, :]
+        im = matrix[split:end, :]
+        out = real + im * 1j
+        return out
 
 if __name__ == "__main__":
     parse = OptionParser()
@@ -106,33 +132,38 @@ if __name__ == "__main__":
                      default=False, help='Loads weights from weights.')
     (options, args) = parse.parse_args()
     print 'Initialising model'
-    model = Source_Separation_LSTM(17, 513)
+    model = Source_Separation_LSTM(get_opt())
+    v_mixture, v_instr1, v_instr2 = model.h5_to_matrix('valid_data.hdf5')
     if options.load is False:
         print 'Training model'
-        print 'Reading in test data'
-        train_mixture, train_instr1, train_instr2 = h5_to_matrix('train_data.hdf5')
-        v_mixture, v_instr1, v_instr2 = h5_to_matrix('valid_data.hdf5')
+        train_mixture, train_instr1, train_instr2 = model.h5_to_matrix('train_data.hdf5')
         print 'Fitting model'
-        model.fit(train_mixture, train_instr1, train_instr2, epoch=3,
-                  batch_size_=200, valid_in=v_mixture,
-                  valid_out=[v_instr1, v_instr2])
+        model.fit(train_mixture, train_instr1, train_instr2,
+                  valid_in=v_mixture, valid_out=[v_instr1, v_instr2])
     else:
         print 'Loading weights from weights.hdf5'
         model.load_weights('weights.hdf5')
-    test_mixture, test_instr1, test_instr2 = h5_to_matrix('test_data.hdf5')
-    test_mixture = test_mixture[600:900, :, :]
-    test_instr1 = test_instr1[600:900, :, :]
-    test_instr2 = test_instr2[600:900, :, :]
-    [out1, out2] = model.predict(test_mixture, batch_size=1)
-    out1 = np.reshape(out1, (300*17, 513)).transpose()
-    out2 = np.reshape(out2, (300*17, 513)).transpose()
-    testinstr1 = np.float64(np.reshape(test_instr1, (300*17, 513))).transpose()
-    testinstr2 = np.float64(np.reshape(test_instr2, (300*17, 513))).transpose()
-    intr1 = librosa.core.istft(testinstr1)
-    intr2 = librosa.core.istft(testinstr2)
-    mp31 = librosa.core.istft(out1)
-    mp32 = librosa.core.istft(out2)
-    librosa.output.write_wav('test_out1.wav', mp31, 22050)
-    librosa.output.write_wav('test_out2.wav', mp32, 22050)
-    librosa.output.write_wav('test1.wav', intr1, 22050)
-    librosa.output.write_wav('test2.wav', intr2, 22050)
+
+    print "Predicting on validation data"
+    [out1, out2] = model.predict(v_mixture, batch_size=100)
+    out1 = np.reshape(out1, (out1.shape[0]*model.timesteps, model.features)).transpose()
+    out2 = np.reshape(out2, (out2.shape[0]*model.timesteps, model.features)).transpose()
+    testinstr1 = np.reshape(v_instr1, (v_instr1.shape[0]*model.timesteps, model.features)).transpose()
+    testinstr2 = np.reshape(v_instr2, (v_instr2.shape[0]*model.timesteps, model.features)).transpose()
+    mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps, model.features)).transpose()
+    out1_comp = model.conc_to_complex(out1)
+    out2_comp = model.conc_to_complex(out2)
+    mixcomp = model.conc_to_complex(mix)
+    test1comp = model.conc_to_complex(testinstr1)
+    test2comp = model.conc_to_complex(testinstr2)
+
+    intr1 = librosa.core.istft(test1comp)
+    intr2 = librosa.core.istft(test2comp)
+    mp31 = librosa.core.istft(out1_comp)
+    mp32 = librosa.core.istft(out2_comp)
+    mix = librosa.core.istft(mixcomp)
+    io.wavfile.write('mix.wav', 22050, mix)
+    io.wavfile.write('test_out1.wav', 22050, mp31)
+    io.wavfile.write('test_out2.wav', 22050, mp32)
+    io.wavfile.write('test1.wav', 22050, intr1)
+    io.wavfile.write('test2.wav', 22050, intr2)
