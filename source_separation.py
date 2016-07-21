@@ -77,7 +77,7 @@ class Source_Separation_LSTM():
         self.init = options['layer_init']
         self.S__init__()
         self.D__init__()
-        make_trainable(self.D, False)
+        self.make_trainable(self.D, False)
         gan_in = Input(batch_size=(None, self.timesteps, self.features),
                        dtype='float32')
         H = self.S(gan_in)
