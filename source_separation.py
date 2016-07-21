@@ -71,9 +71,9 @@ class Source_Separation_LSTM():
         self.batch_size = options['batch_size']
         self.mix = Input(batch_shape=(None, self.timesteps, self.features),
                          dtype='float32')
-        self.conv = Convolution1D(self.features, self.conv_masks,
-                                  border_mode='same')(self.mix)
-        self.lstm = LSTM(self.features, return_sequences=True)(self.conv)
+        # self.conv = Convolution1D(self.features, self.conv_masks,
+                                  # border_mode='same')(self.mix)
+        self.lstm = LSTM(self.features, return_sequences=True)(self.mix)
         self.lstm2 = LSTM(self.features, return_sequences=True)(self.lstm)
         self.lstm2_drop = Dropout(self.drop)(self.lstm2)
         self.out1 = TimeDistributed(Dense(self.features,
@@ -83,7 +83,7 @@ class Source_Separation_LSTM():
 
         self.model = Model(input=[self.mix], output=[self.out1, self.out2])
         self.model.compile(loss=[self.objective_1, self.objective_2],
-                           optimizer='SGD')
+                           optimizer='Adagrad')
         if self.plot:
             plot(self.model, to_file='model.png')
         # Save best weights to hdf5 file

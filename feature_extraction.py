@@ -41,11 +41,11 @@ class FeatureExtraction():
         # First half of list is training data
         self.train_list = self.song_dir[0:int(len(self.song_dir)/2)]
         # The next quater of list is test data
-        self.test_list = self.song_dir[int(len(self.song_dir)/2 + 1):
+        self.test_list = self.song_dir[int(len(self.song_dir)/2):
                                        int(3*len(self.song_dir)/4)]
         # The last quater of list is validation data
-        self.valid_list = self.song_dir[int(3*len(self.song_dir)/4 + 1):
-                                        len(self.song_dir) - 1]
+        self.valid_list = self.song_dir[int(3*len(self.song_dir)/4):
+                                        len(self.song_dir)]
         if os.path.isfile('train_data.hdf5'):
             if user_query(('hdf5 data files already exist. Do you want to'
                           ' overwrite?')):
@@ -112,7 +112,7 @@ class FeatureExtraction():
 
     def get_data(self, file):
         """Read in data from all .wav files inside folder & computes STFT."""
-        y, sr_ = librosa.load(file, duration=30)
+        y, sr_ = librosa.load(file, duration=120)
         S = librosa.core.stft(y=y, n_fft=self.n_fft).transpose()
         return S, sr_
 
