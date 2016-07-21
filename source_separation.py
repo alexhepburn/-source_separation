@@ -2,7 +2,7 @@
 import numpy as np
 from keras.models import Model
 from keras.layers import Dense, TimeDistributed, LSTM, Input, Dropout, \
-                         Convolution1D
+                         Convolution1D, Flatten
 from keras.utils.visualize_util import plot
 from keras.objectives import mean_squared_error
 from keras.callbacks import ModelCheckpoint  # , EarlyStopping
@@ -57,6 +57,11 @@ class Source_Separation_LSTM():
         """Load weights from saved weights file in hdf5."""
         self.model.load_weights(path)
 
+    def make_train(self, net, val):
+        net.trainable = val
+        for l in net.layers:
+            l.trainable = val
+
     def __init__(self, options):
         """Initialise network structure."""
         self.timesteps = options['timesteps']
@@ -69,27 +74,52 @@ class Source_Separation_LSTM():
         self.plot = options['plot']
         self.epoch = options['epoch']
         self.batch_size = options['batch_size']
-        self.mix = Input(batch_shape=(None, self.timesteps, self.features),
-                         dtype='float32')
-        # self.conv = Convolution1D(self.features, self.conv_masks,
-                                  # border_mode='same')(self.mix)
-        self.lstm = LSTM(self.features, return_sequences=True)(self.mix)
-        self.lstm2 = LSTM(self.features, return_sequences=True)(self.lstm)
-        self.lstm2_drop = Dropout(self.drop)(self.lstm2)
-        self.out1 = TimeDistributed(Dense(self.features,
-                                          activation='relu'))(self.lstm2_drop)
-        self.out2 = TimeDistributed(Dense(self.features,
-                                          activation='relu'))(self.lstm2_drop)
-
-        self.model = Model(input=[self.mix], output=[self.out1, self.out2])
-        self.model.compile(loss=[self.objective_1, self.objective_2],
-                           optimizer='Adagrad')
+        self.init = options['layer_init']
+        self.S__init__()
+        self.D__init__()
+        make_trainable(self.D, False)
+        gan_in = Input(batch_size=(None, self.timesteps, self.features),
+                       dtype='float32')
+        H = self.S(gan_in)
+        gan_V = self.D(H)
+        self.GAN = Model(gan_in, gan_V)
+        GAN.complile(loss='categorical_crossentropy', optimizerrrr='Adagrad')
         if self.plot:
-            plot(self.model, to_file='model.png')
+            plot(self.S, to_file='model.png')
         # Save best weights to hdf5 file
         self.checkpointer = ModelCheckpoint(filepath="weights.hdf5", verbose=1,
                                             save_best_only=True)
 
+    def S__init__(self):
+        mix = Input(batch_shape=(None, self.timesteps, self.features),
+                    dtype='float32')
+        conv = Convolution1D(self.features, self.conv_masks,
+                             border_mode='same', init=self.init)(mix)
+        lstm = LSTM(self.features, return_sequences=True, init=self.init)(conv)
+        lstm2 = LSTM(self.features, return_sequences=True, init=self.init)(lstm)
+        lstm2_drop = Dropout(self.drop)(lstm2)
+        self.S_out1 = TimeDistributed(Dense(self.features,
+                                            activation='relu',
+                                            init=self.init))(lstm2_drop)
+        self.S_out2 = TimeDistributed(Dense(self.features,
+                                            activation='relu',
+                                            init=self.init))(lstm2_drop)
+
+        self.S = Model(input=[self.mix], output=[self.out1, self.out2])
+        self.S.compile(loss=[self.objective_1, self.objective_2],
+                       optimizer='Adagrad')
+
+    # Could pretrain D for faster convergence
+    def D__init__(self):
+        inp = Input(batch_shape=(None, self.timesteps, self.features),
+                    dtype='float32')
+        d_1 = Dense(self.features, activation='relu', init=self.init)(inp)
+        d_2 = Dense(100, activation='relu', init_self.init)(d_1)
+        d_3 = Dropout(self.dropout)(d_2)
+        d_4 = Flatten()(d_3)
+        d_v = Dense(2, activation='softmax')(d_4)
+        self.D = Model.(inp, d_v)
+        self.D.compile(loss='categorical_crossentropy', optimizer='Adagrad')
 
     def h5_to_matrix(self, h5_file):
         with h5py.File(h5_file, 'r') as f:
