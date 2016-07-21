@@ -11,7 +11,6 @@ import librosa
 from optparse import OptionParser
 from options import get_opt
 from scipy import io
-import sys
 
 
 class Source_Separation_LSTM():
@@ -90,7 +89,6 @@ class Source_Separation_LSTM():
         self.checkpointer = ModelCheckpoint(filepath="weights.hdf5", verbose=1,
                                             save_best_only=True)
 
-
     def h5_to_matrix(self, h5_file):
         with h5py.File(h5_file, 'r') as f:
             song_names = f.keys()[:]
@@ -115,7 +113,6 @@ class Source_Separation_LSTM():
                     instr2[start:end, :, :] = np.array(f[song][instr_names[1]])
                     start = end
         return mixture, instr1, instr2
-
 
     def conc_to_complex(self, matrix):
         """Turn matrix in form [real, complex] to compelx number."""
