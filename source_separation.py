@@ -5,7 +5,7 @@ from keras.layers import Dense, TimeDistributed, LSTM, Input, Dropout, \
                          Convolution1D
 from keras.utils.visualize_util import plot
 from keras.objectives import mean_squared_error
-from keras.callbacks import ModelCheckpoint  # , EarlyStopping
+from keras.callbacks import ModelCheckpoint
 import h5py
 import librosa
 from optparse import OptionParser
@@ -70,17 +70,19 @@ class Source_Separation_LSTM():
         self.batch_size = options['batch_size']
         self.mix = Input(batch_shape=(None, self.timesteps, self.features),
                          dtype='float32')
-        # self.conv = Convolution1D(self.features, self.conv_masks,
-                                  # border_mode='same')(self.mix)
+        self.conv = Convolution1D(self.features, self.conv_masks,
+                                  border_mode='same')(self.mix)
         self.lstm = LSTM(self.features, return_sequences=True)(self.mix)
         self.lstm2 = LSTM(self.features, return_sequences=True)(self.lstm)
         self.lstm2_drop = Dropout(self.drop)(self.lstm2)
         self.out1 = TimeDistributed(Dense(self.features,
                                           activation='relu'))(self.lstm2_drop)
+        self.lstmo1 = LSTM(self.features, return_sequences=True)(self.out1)
         self.out2 = TimeDistributed(Dense(self.features,
                                           activation='relu'))(self.lstm2_drop)
-
-        self.model = Model(input=[self.mix], output=[self.out1, self.out2])
+        self.lstmo2 = LSTM(self.features, return_sequences=True)(self.out2)
+        self.model = Model(input=[self.mix], output=[self.lstmo1,
+                                                     self.lstmo2])
         self.model.compile(loss=[self.objective_1, self.objective_2],
                            optimizer='Adagrad')
         if self.plot:
@@ -90,6 +92,7 @@ class Source_Separation_LSTM():
                                             save_best_only=True)
 
     def h5_to_matrix(self, h5_file):
+        """Read in data from h5file into feature matrix for each instrument."""
         with h5py.File(h5_file, 'r') as f:
             song_names = f.keys()[:]
             del song_names[song_names.index('count')]
@@ -107,8 +110,6 @@ class Source_Separation_LSTM():
                 if isinstance(f[song], h5py.Group) is True:
                     end = start + np.array(f[song]['mix']).shape[0]
                     mixture[start:end, :, :] = np.array(f[song]['mix'])
-                    print 'Instrument 1: {}'.format(instr_names[0])
-                    print 'Instrument 2: {}'.format(instr_names[1])
                     instr1[start:end, :, :] = np.array(f[song][instr_names[0]])
                     instr2[start:end, :, :] = np.array(f[song][instr_names[1]])
                     start = end
@@ -133,7 +134,8 @@ if __name__ == "__main__":
     v_mixture, v_instr1, v_instr2 = model.h5_to_matrix('valid_data.hdf5')
     if options.load is False:
         print 'Training model'
-        train_mixture, train_instr1, train_instr2 = model.h5_to_matrix('train_data.hdf5')
+        train_mixture, train_instr1, \
+            train_instr2 = model.h5_to_matrix('train_data.hdf5')
         print 'Fitting model'
         model.fit(train_mixture, train_instr1, train_instr2,
                   valid_in=v_mixture, valid_out=[v_instr1, v_instr2])
@@ -143,11 +145,21 @@ if __name__ == "__main__":
 
     print "Predicting on validation data"
     [out1, out2] = model.predict(v_mixture, batch_size=100)
-    out1 = np.reshape(out1, (out1.shape[0]*model.timesteps, model.features)).transpose()
-    out2 = np.reshape(out2, (out2.shape[0]*model.timesteps, model.features)).transpose()
-    testinstr1 = np.reshape(v_instr1, (v_instr1.shape[0]*model.timesteps, model.features)).transpose()
-    testinstr2 = np.reshape(v_instr2, (v_instr2.shape[0]*model.timesteps, model.features)).transpose()
-    mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps, model.features)).transpose()
+    out1 = np.reshape(out1, (out1.shape[0]*model.timesteps,
+                             model.features)).transpose()
+    out2 = np.reshape(out2, (out2.shape[0]*model.timesteps,
+                             model.features)).transpose()
+    testinstr1 = np.reshape(v_instr1, (v_instr1.shape[0]*model.timesteps,
+                            model.features)).transpose()
+    testinstr2 = np.reshape(v_instr2, (v_instr2.shape[0]*model.timesteps,
+                            model.features)).transpose()
+    mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps,
+                     model.features)).transpose()
+    instr1_softmask = librosa.util.softmask(np.absolute(testinstr1), np.absolute(mix), power=2)
+    instr2_softmask = librosa.util.softmask(np.absolute(testinstr2), np.absolute(mix), power=2)
+
+    out1 = out1 * instr1_softmask
+    out2 = out2 * instr2_softmask
     out1_comp = model.conc_to_complex(out1)
     out2_comp = model.conc_to_complex(out2)
     mixcomp = model.conc_to_complex(mix)

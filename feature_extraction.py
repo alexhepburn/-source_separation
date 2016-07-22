@@ -80,14 +80,14 @@ class FeatureExtraction():
                     conc = np.reshape(conc, (-1, self.timesteps, self.features))
                     num += conc.shape[0]
                     grp['mix'] = conc
-                if self.instr[0] in file and instr1 is False:
+                elif self.instr[0] in file and instr1 is False:
                     print file
                     instr1 = True
                     S, sr_ = self.get_data(file_path)
                     conc = np.hstack((S.real, S.imag))
                     conc = np.reshape(conc, (-1, self.timesteps, self.features))
                     grp[self.instr[0]] = conc
-                if self.instr[1] in file and instr2 is False:
+                elif self.instr[1] in file and instr2 is False:
                     print file
                     instr2 = True
                     S, sr_ = self.get_data(file_path)
