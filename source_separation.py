@@ -72,17 +72,20 @@ class Source_Separation_LSTM():
                          dtype='float32')
         self.conv = Convolution1D(self.features, self.conv_masks,
                                   border_mode='same')(self.mix)
-        self.lstm = LSTM(self.features, return_sequences=True)(self.mix)
-        self.lstm2 = LSTM(self.features, return_sequences=True)(self.lstm)
-        self.lstm2_drop = Dropout(self.drop)(self.lstm2)
+        self.conv = Convolution1D(128, self.conv_masks,
+                                  border_mode='same')(self.mix)
+        self.conv = Convolution1D(64, self.conv_masks,
+                                  border_mode='same')(self.mix)
+        self.conv = Convolution1D(128, self.conv_masks,
+                                  border_mode='same')(self.mix)
+        self.conv = Convolution1D(self.features, self.conv_masks,
+                                  border_mode='same')(self.mix)
         self.out1 = TimeDistributed(Dense(self.features,
-                                          activation='relu'))(self.lstm2_drop)
-        self.lstmo1 = LSTM(self.features, return_sequences=True)(self.out1)
+                                          activation='relu'))(self.conv)
         self.out2 = TimeDistributed(Dense(self.features,
-                                          activation='relu'))(self.lstm2_drop)
-        self.lstmo2 = LSTM(self.features, return_sequences=True)(self.out2)
-        self.model = Model(input=[self.mix], output=[self.lstmo1,
-                                                     self.lstmo2])
+                                          activation='relu'))(self.conv)
+        self.model = Model(input=[self.mix], output=[self.out1,
+                                                     self.out2])
         self.model.compile(loss=[self.objective_1, self.objective_2],
                            optimizer='Adagrad')
         if self.plot:
@@ -116,7 +119,7 @@ class Source_Separation_LSTM():
         return mixture, instr1, instr2
 
     def conc_to_complex(self, matrix):
-        """Turn matrix in form [real, complex] to compelx number."""
+        """Turn matrix that has imaginary as features to complex matrix."""
         split = self.features/2
         end = matrix.shape[0]
         real = matrix[0:split, :]
@@ -155,13 +158,15 @@ if __name__ == "__main__":
                             model.features)).transpose()
     mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps,
                      model.features)).transpose()
-    instr1_softmask = librosa.util.softmask(np.absolute(testinstr1), np.absolute(mix), power=2)
-    instr2_softmask = librosa.util.softmask(np.absolute(testinstr2), np.absolute(mix), power=2)
+    instr1_softmask = librosa.util.softmask(np.absolute(testinstr1),
+                                            np.absolute(mix), power=10)
+    instr2_softmask = librosa.util.softmask(np.absolute(testinstr2),
+                                            np.absolute(mix), power=10)
 
     out1 = out1 * instr1_softmask
     out2 = out2 * instr2_softmask
-    out1_comp = model.conc_to_complex(out1)
-    out2_comp = model.conc_to_complex(out2)
+    out1_comp = model.conc_to_complex(out1*30)
+    out2_comp = model.conc_to_complex(out2*30)
     mixcomp = model.conc_to_complex(mix)
     test1comp = model.conc_to_complex(testinstr1)
     test2comp = model.conc_to_complex(testinstr2)
