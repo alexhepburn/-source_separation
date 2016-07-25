@@ -113,7 +113,8 @@ class FeatureExtraction():
     def get_data(self, file):
         """Read in data from all .wav files inside folder & computes STFT."""
         y, sr_ = librosa.load(file, duration=120)
-        S = librosa.core.stft(y=y, n_fft=self.n_fft).transpose()
+        y_harm, y_perc = librosa.effects.hpss(y)
+        S = librosa.core.stft(y=y_harm, n_fft=self.n_fft).transpose()
         return S, sr_
 
 
