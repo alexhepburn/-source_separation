@@ -64,25 +64,24 @@ class Source_Separation_LSTM():
         self.out2_true = 0
         self.gamma = options['gamma']
         self.drop = options['dropout']
-        self.conv_masks = options['conv_masks']
         self.plot = options['plot']
         self.epoch = options['epoch']
         self.batch_size = options['batch_size']
         self.mix = Input(batch_shape=(None, self.timesteps, self.features),
                          dtype='float32')
-        self.conv = Convolution1D(self.features, self.conv_masks,
-                                  border_mode='same')(self.mix)
         self.lstm = LSTM(self.features, return_sequences=True)(self.mix)
         self.lstm2 = LSTM(self.features, return_sequences=True)(self.lstm)
         self.lstm2_drop = Dropout(self.drop)(self.lstm2)
         self.out1 = TimeDistributed(Dense(self.features,
                                           activation='relu'))(self.lstm2_drop)
-        self.lstmo1 = LSTM(self.features, return_sequences=True)(self.out1)
+        self.out1 = TimeDistributed(Dense(self.features,
+                                          activation='relu'))(self.out1)
         self.out2 = TimeDistributed(Dense(self.features,
                                           activation='relu'))(self.lstm2_drop)
-        self.lstmo2 = LSTM(self.features, return_sequences=True)(self.out2)
-        self.model = Model(input=[self.mix], output=[self.lstmo1,
-                                                     self.lstmo2])
+        self.out2 = TimeDistributed(Dense(self.features,
+                                          activation='relu'))(self.out2)
+        self.model = Model(input=[self.mix], output=[self.out1,
+                                                     self.out2])
         self.model.compile(loss=[self.objective_1, self.objective_2],
                            optimizer='Adagrad')
         if self.plot:
@@ -155,8 +154,10 @@ if __name__ == "__main__":
                             model.features)).transpose()
     mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps,
                      model.features)).transpose()
-    instr1_softmask = librosa.util.softmask(np.absolute(testinstr1), np.absolute(mix), power=2)
-    instr2_softmask = librosa.util.softmask(np.absolute(testinstr2), np.absolute(mix), power=2)
+    instr1_softmask = librosa.util.softmask(np.absolute(testinstr1),
+                                            np.absolute(mix), power=2)
+    instr2_softmask = librosa.util.softmask(np.absolute(testinstr2),
+                                            np.absolute(mix), power=2)
 
     out1 = out1 * instr1_softmask
     out2 = out2 * instr2_softmask
@@ -172,7 +173,7 @@ if __name__ == "__main__":
     mp32 = librosa.core.istft(out2_comp)
     mix = librosa.core.istft(mixcomp)
     io.wavfile.write('mix.wav', 22050, mix)
-    io.wavfile.write('test_out1.wav', 22050, mp31)
-    io.wavfile.write('test_out2.wav', 22050, mp32)
+    io.wavfile.write('test_out1.wav', 22050, mp31*10)
+    io.wavfile.write('test_out2.wav', 22050, mp32*10)
     io.wavfile.write('test1.wav', 22050, intr1)
     io.wavfile.write('test2.wav', 22050, intr2)

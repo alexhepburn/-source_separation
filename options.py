@@ -12,7 +12,6 @@ def get_opt():
     opt['d_path'] = '/home/alexhepburn/Documents/Datasets/Separation dataset/'
     opt['dropout'] = 0.25
     opt['gamma'] = 0.5  # Parameter in front of similarity term for cost.
-    opt['conv_masks'] = 3
     opt['epoch'] = 5
     opt['batch_size'] = 200
     opt['plot'] = False
