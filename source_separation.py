@@ -73,13 +73,13 @@ class Source_Separation_LSTM():
         self.conv = Convolution1D(self.features, self.conv_masks,
                                   border_mode='same')(self.mix)
         self.conv = Convolution1D(128, self.conv_masks,
-                                  border_mode='same')(self.mix)
+                                  border_mode='same')(self.conv)
         self.conv = Convolution1D(64, self.conv_masks,
-                                  border_mode='same')(self.mix)
+                                  border_mode='same')(self.conv)
         self.conv = Convolution1D(128, self.conv_masks,
-                                  border_mode='same')(self.mix)
+                                  border_mode='same')(self.conv)
         self.conv = Convolution1D(self.features, self.conv_masks,
-                                  border_mode='same')(self.mix)
+                                  border_mode='same')(self.conv)
         self.out1 = TimeDistributed(Dense(self.features,
                                           activation='relu'))(self.conv)
         self.out2 = TimeDistributed(Dense(self.features,
@@ -139,7 +139,6 @@ if __name__ == "__main__":
         print 'Training model'
         train_mixture, train_instr1, \
             train_instr2 = model.h5_to_matrix('train_data.hdf5')
-        print 'Fitting model'
         model.fit(train_mixture, train_instr1, train_instr2,
                   valid_in=v_mixture, valid_out=[v_instr1, v_instr2])
     else:
@@ -159,14 +158,14 @@ if __name__ == "__main__":
     mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps,
                      model.features)).transpose()
     instr1_softmask = librosa.util.softmask(np.absolute(testinstr1),
-                                            np.absolute(mix), power=10)
+                                            np.absolute(mix), power=2)
     instr2_softmask = librosa.util.softmask(np.absolute(testinstr2),
-                                            np.absolute(mix), power=10)
+                                            np.absolute(mix), power=2)
 
-    out1 = out1 * instr1_softmask
-    out2 = out2 * instr2_softmask
-    out1_comp = model.conc_to_complex(out1*30)
-    out2_comp = model.conc_to_complex(out2*30)
+    #out1 = np.multiply(out1, instr1_softmask)
+    #out2 = np.multiply(out2, instr2_softmask)
+    out1_comp = model.conc_to_complex(out1*10)
+    out2_comp = model.conc_to_complex(out2*10)
     mixcomp = model.conc_to_complex(mix)
     test1comp = model.conc_to_complex(testinstr1)
     test2comp = model.conc_to_complex(testinstr2)
