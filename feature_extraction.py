@@ -32,8 +32,7 @@ class FeatureExtraction():
             # 2 instruments that the features will be calculated
             # for
             if (any('mix' in word for word in xdir) and
-                    any(self.instr[0] in word for word in xdir) and
-                    any(self.instr[1] in word for word in xdir)):
+                    any(self.instr[0] in word for word in xdir)):
                 self.song_dir.append(x)
         random.shuffle(self.song_dir)
         print 'Number of songs found with mixture and instruments defined:' \
@@ -70,7 +69,7 @@ class FeatureExtraction():
             print 'Reading in ' + fold
             # Store features for each instrument in the songs subgroup
             grp = h5_file.create_group(fold)
-            mix, instr1, instr2 = False, False, False
+            mix, instr1 = False, False
             for file in list_:
                 file_path = self.dataset_dir + fold + '/' + file
                 if 'mix' in file and mix is False:
@@ -87,13 +86,6 @@ class FeatureExtraction():
                     conc = np.hstack((S.real, S.imag))
                     conc = np.reshape(conc, (-1, self.timesteps, self.features))
                     grp[self.instr[0]] = conc
-                if self.instr[1] in file and instr2 is False:
-                    print file
-                    instr2 = True
-                    S, sr_ = self.get_data(file_path)
-                    conc = np.hstack((S.real, S.imag))
-                    conc = np.reshape(conc, (-1, self.timesteps, self.features))
-                    grp[self.instr[1]] = conc
         return num
 
     def write_h5s(self):
@@ -113,7 +105,8 @@ class FeatureExtraction():
     def get_data(self, file):
         """Read in data from all .wav files inside folder & computes STFT."""
         y, sr_ = librosa.load(file, duration=120)
-        S = librosa.core.stft(y=y, n_fft=self.n_fft).transpose()
+        y_harm, y_perc = librosa.effects.hpss(y)
+        S = librosa.core.stft(y=y_harm, n_fft=self.n_fft).transpose()
         return S, sr_
 
 
@@ -125,7 +118,7 @@ if __name__ == '__main__':
     parse.add_option('--instruments', '-i', type='string', action='callback',
                      callback=option_callback, dest='instruments')
     (options, args) = parse.parse_args()
-    if len(options.instruments) != 2:
-        sys.exit('2 instruments must be defined using -i option.')
+    if len(options.instruments) != 1:
+        sys.exit('1 instrument must be defined using -i option.')
     opt = get_opt()
     f = FeatureExtraction(opt, options.instruments)

@@ -1,6 +1,6 @@
 """Using LSTM layers to separate audio from TRIOS_dataset."""
 import numpy as np
-from keras.models import Model
+from keras.models import Model, Sequential
 from keras.layers import Dense, TimeDistributed, LSTM, Input, Dropout, \
                          Convolution1D, Flatten
 from keras.utils.visualize_util import plot
@@ -39,23 +39,39 @@ class Source_Separation_LSTM():
         diff = mean_squared_error(out2_pred, self.out1_true)
         return mse - self.gamma * diff
 
-    def fit(self, input, out1_true, out2_true, valid_in, valid_out):
+    def fit(self, input, out1_true, valid_in, valid_out):
         """Train neural network given input data and corresponding output."""
-        self.out1_true = out1_true
-        self.out2_true = out2_true
-        self.model.fit(input, [out1_true, out2_true], nb_epoch=self.epoch,
-                       batch_size=self.batch_size,
-                       callbacks=[self.checkpointer],
-                       validation_data=(valid_in, valid_out))
+        for epoch in range(1):
+            p = np.random.permutation(input.shape[0]-1)
+            start = 0
+            end = 0
+            while len(p) - end > self.batch_size:
+                end += self.batch_size
+                ind = p[start:end]
+                batch = input[ind, :, :]
+                batch_out = out1_true[ind, :, :]
+                self.G.train_on_batch(batch, batch_out)
+                pred = self.G.predict(batch)
+                D_in = np.concatenate((batch, pred))
+                y = np.concatenate((np.ones((self.batch_size, self.timesteps,
+                                             1)),
+                                    np.zeros((self.batch_size,
+                                              self.timesteps, 1))))
+                d_loss = self.D.train_on_batch(D_in, y)
+                g_loss = self.GAN.train_on_batch(batch,
+                                                 np.ones((self.batch_size,
+                                                          self.timesteps, 1)))
+                print "d_loss: {}   g_loss: {}".format(d_loss, g_loss)
+                start += self.batch_size
 
     def predict(self, test, batch_size):
         """Predict output given input using neural network."""
-        out1, out2 = self.model.predict(test, batch_size)
-        return out1, out2
+        out1 = self.G.predict(test, batch_size)
+        return out1
 
     def load_weights(self, path):
         """Load weights from saved weights file in hdf5."""
-        self.model.load_weights(path)
+        self.GAN.load_weights(path)
 
     def make_train(self, net, val):
         net.trainable = val
@@ -70,55 +86,49 @@ class Source_Separation_LSTM():
         self.out2_true = 0
         self.gamma = options['gamma']
         self.drop = options['dropout']
-        self.conv_masks = options['conv_masks']
         self.plot = options['plot']
         self.epoch = options['epoch']
         self.batch_size = options['batch_size']
         self.init = options['layer_init']
-        self.S__init__()
+        self.G__init__()
         self.D__init__()
-        self.make_trainable(self.D, False)
-        gan_in = Input(batch_size=(None, self.timesteps, self.features),
+        self.make_train(self.D, False)
+        gan_in = Input(batch_shape=(None, self.timesteps, self.features),
                        dtype='float32')
-        H = self.S(gan_in)
-        gan_V = self.D(H)
-        self.GAN = Model(gan_in, gan_V)
-        GAN.complile(loss='categorical_crossentropy', optimizerrrr='Adagrad')
+        H = self.G(gan_in)
+        gan_out = self.D(H)
+        self.GAN = Model(gan_in, gan_out)
+        self.GAN.compile(loss='categorical_crossentropy', optimizer='Adagrad')
         if self.plot:
-            plot(self.S, to_file='model.png')
+            plot(self.GAN, to_file='model.png')
         # Save best weights to hdf5 file
         self.checkpointer = ModelCheckpoint(filepath="weights.hdf5", verbose=1,
                                             save_best_only=True)
 
-    def S__init__(self):
+    def G__init__(self):
         mix = Input(batch_shape=(None, self.timesteps, self.features),
                     dtype='float32')
-        conv = Convolution1D(self.features, self.conv_masks,
-                             border_mode='same', init=self.init)(mix)
-        lstm = LSTM(self.features, return_sequences=True, init=self.init)(conv)
+        lstm = LSTM(self.features, return_sequences=True, init=self.init)(mix)
         lstm2 = LSTM(self.features, return_sequences=True, init=self.init)(lstm)
         lstm2_drop = Dropout(self.drop)(lstm2)
-        self.S_out1 = TimeDistributed(Dense(self.features,
-                                            activation='relu',
-                                            init=self.init))(lstm2_drop)
-        self.S_out2 = TimeDistributed(Dense(self.features,
-                                            activation='relu',
-                                            init=self.init))(lstm2_drop)
-
-        self.S = Model(input=[self.mix], output=[self.out1, self.out2])
-        self.S.compile(loss=[self.objective_1, self.objective_2],
-                       optimizer='Adagrad')
+        self.G_out = TimeDistributed(Dense(self.features,
+                                     activation='relu',
+                                     init=self.init))(lstm2_drop)
+        self.G = Model(input=[mix], output=self.G_out)
+        self.G.compile(loss='categorical_crossentropy', optimizer='Adagrad')
 
     # Could pretrain D for faster convergence
     def D__init__(self):
         inp = Input(batch_shape=(None, self.timesteps, self.features),
                     dtype='float32')
-        d_1 = Dense(self.features, activation='relu', init=self.init)(inp)
-        d_2 = Dense(100, activation='relu', init_self.init)(d_1)
-        d_3 = Dropout(self.dropout)(d_2)
-        d_4 = Flatten()(d_3)
-        d_v = Dense(2, activation='softmax')(d_4)
-        self.D = Model.(inp, d_v)
+        d_1 = TimeDistributed(Dense(self.features, activation='relu',
+                                    init=self.init))(inp)
+        d_2 = TimeDistributed(Dense(100, activation='relu',
+                                    init=self.init))(d_1)
+        d_3 = Dropout(self.drop)(d_2)
+        d_v = TimeDistributed(Dense(1, activation='relu',
+                              init=self.init))(d_3)
+        self.D = Model(inp, d_v)
         self.D.compile(loss='categorical_crossentropy', optimizer='Adagrad')
 
     def h5_to_matrix(self, h5_file):
@@ -132,20 +142,14 @@ class Source_Separation_LSTM():
                                dtype=np.float32)
             instr1 = np.zeros((num, self.timesteps, self.features),
                               dtype=np.float32)
-            instr2 = np.zeros((num, self.timesteps, self.features),
-                              dtype=np.float32)
             start = 0
             for song in song_names:
                 if isinstance(f[song], h5py.Group) is True:
                     end = start + np.array(f[song]['mix']).shape[0]
                     mixture[start:end, :, :] = np.array(f[song]['mix'])
-                    print 'Instrument 1: {}'.format(instr_names[0])
-                    print 'Instrument 2: {}'.format(instr_names[1])
                     instr1[start:end, :, :] = np.array(f[song][instr_names[0]])
-                    instr2[start:end, :, :] = np.array(f[song][instr_names[1]])
                     start = end
-        return mixture, instr1, instr2
-
+        return mixture, instr1
 
     def conc_to_complex(self, matrix):
         """Turn matrix in form [real, complex] to compelx number."""
@@ -163,37 +167,32 @@ if __name__ == "__main__":
     (options, args) = parse.parse_args()
     print 'Initialising model'
     model = Source_Separation_LSTM(get_opt())
-    v_mixture, v_instr1, v_instr2 = model.h5_to_matrix('valid_data.hdf5')
+    v_mixture, v_instr1 = model.h5_to_matrix('valid_data.hdf5')
     if options.load is False:
         print 'Training model'
-        train_mixture, train_instr1, train_instr2 = model.h5_to_matrix('train_data.hdf5')
+        train_mixture, train_instr1 = model.h5_to_matrix('train_data.hdf5')
         print 'Fitting model'
-        model.fit(train_mixture, train_instr1, train_instr2,
-                  valid_in=v_mixture, valid_out=[v_instr1, v_instr2])
+        model.fit(train_mixture, train_instr1, valid_in=v_mixture,
+                  valid_out=v_instr1[0:800, :, :])
+        model.GAN.save_weights('weights.hdf5', overwrite=True)
     else:
         print 'Loading weights from weights.hdf5'
         model.load_weights('weights.hdf5')
 
     print "Predicting on validation data"
-    [out1, out2] = model.predict(v_mixture, batch_size=100)
+    out1 = model.predict(v_mixture, batch_size=100)
     out1 = np.reshape(out1, (out1.shape[0]*model.timesteps, model.features)).transpose()
-    out2 = np.reshape(out2, (out2.shape[0]*model.timesteps, model.features)).transpose()
-    testinstr1 = np.reshape(v_instr1, (v_instr1.shape[0]*model.timesteps, model.features)).transpose()
-    testinstr2 = np.reshape(v_instr2, (v_instr2.shape[0]*model.timesteps, model.features)).transpose()
-    mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps, model.features)).transpose()
     out1_comp = model.conc_to_complex(out1)
-    out2_comp = model.conc_to_complex(out2)
+    mp31 = librosa.core.istft(out1_comp)
+    io.wavfile.write('test_out1.wav', 22050, mp31)
+    print "wrote test_out1.wav"
+    testinstr1 = np.reshape(v_instr1, (v_instr1.shape[0]*model.timesteps, model.features)).transpose()
+    mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps, model.features)).transpose()
+
     mixcomp = model.conc_to_complex(mix)
     test1comp = model.conc_to_complex(testinstr1)
-    test2comp = model.conc_to_complex(testinstr2)
 
     intr1 = librosa.core.istft(test1comp)
-    intr2 = librosa.core.istft(test2comp)
-    mp31 = librosa.core.istft(out1_comp)
-    mp32 = librosa.core.istft(out2_comp)
     mix = librosa.core.istft(mixcomp)
     io.wavfile.write('mix.wav', 22050, mix)
-    io.wavfile.write('test_out1.wav', 22050, mp31)
-    io.wavfile.write('test_out2.wav', 22050, mp32)
     io.wavfile.write('test1.wav', 22050, intr1)
-    io.wavfile.write('test2.wav', 22050, intr2)
