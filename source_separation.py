@@ -2,17 +2,18 @@
 import numpy as np
 from keras.models import Model, Sequential
 from keras.layers import Dense, TimeDistributed, LSTM, Input, Dropout, \
-                         Convolution1D, Flatten
+                         Convolution1D, Flatten, GRU
 from keras.utils.visualize_util import plot
+from keras.layers.advanced_activations import LeakyReLU
 from keras.objectives import mean_squared_error
+from keras.optimizers import Adagrad
 from keras.callbacks import ModelCheckpoint  # , EarlyStopping
 import h5py
 import librosa
 from optparse import OptionParser
 from options import get_opt
 from scipy import io
-import sys
-
+import time
 
 class Source_Separation_LSTM():
     """Class that separates instruments from a mixture using LSTM."""
@@ -39,30 +40,40 @@ class Source_Separation_LSTM():
         diff = mean_squared_error(out2_pred, self.out1_true)
         return mse - self.gamma * diff
 
-    def fit(self, input, out1_true, valid_in, valid_out):
+    # add validation for early stopping
+    def fit(self, input, out1_true):
         """Train neural network given input data and corresponding output."""
-        for epoch in range(1):
+        start_time = time.time()
+        y = np.concatenate((np.ones((self.batch_size, self.timesteps, 1)),
+                            np.zeros((self.batch_size, self.timesteps, 1))))
+        if self.pre_train_D:
+            ind = np.random.permutation(400)
+            predi = self.G.predict(input[0:400])
+            y2 = np.concatenate((np.ones((400, self.timesteps, 1)),
+                                np.zeros((400, self.timesteps, 1))))
+            d2 = np.concatenate((input[0:400], predi))
+            self.D.fit(d2, y2, batch_size=self.batch_size, nb_epoch=5)
+        for epoch in range(self.epoch):
+            print "Epoch: {}".format(epoch)
             p = np.random.permutation(input.shape[0]-1)
             start = 0
             end = 0
             while len(p) - end > self.batch_size:
                 end += self.batch_size
                 ind = p[start:end]
-                batch = input[ind, :, :]
+                self.batch = input[ind, :, :]
                 batch_out = out1_true[ind, :, :]
-                self.G.train_on_batch(batch, batch_out)
-                pred = self.G.predict(batch)
-                D_in = np.concatenate((batch, pred))
-                y = np.concatenate((np.ones((self.batch_size, self.timesteps,
-                                             1)),
-                                    np.zeros((self.batch_size,
-                                              self.timesteps, 1))))
+                g_loss = self.G.train_on_batch(self.batch, batch_out)
+                self.pred = self.G.predict(self.batch)
+                D_in = np.concatenate((self.batch, self.pred))
+                self.D.trainable = True
                 d_loss = self.D.train_on_batch(D_in, y)
-                g_loss = self.GAN.train_on_batch(batch,
-                                                 np.ones((self.batch_size,
-                                                          self.timesteps, 1)))
-                print "d_loss: {}   g_loss: {}".format(d_loss, g_loss)
+                self.D.trainable = False
+                self.GAN.train_on_batch(self.batch, np.zeros((self.batch_size, self.timesteps, 1)))
+                print "d_loss: {}, g_loss: {}".format(d_loss[1], g_loss)
                 start += self.batch_size
+            self.GAN.save_weights("weights.hdf5", overwrite=True)
+            print "Elapsed time: {}".format(time.time()-start_time)
 
     def predict(self, test, batch_size):
         """Predict output given input using neural network."""
@@ -72,11 +83,6 @@ class Source_Separation_LSTM():
     def load_weights(self, path):
         """Load weights from saved weights file in hdf5."""
         self.GAN.load_weights(path)
-
-    def make_train(self, net, val):
-        net.trainable = val
-        for l in net.layers:
-            l.trainable = val
 
     def __init__(self, options):
         """Initialise network structure."""
@@ -90,15 +96,10 @@ class Source_Separation_LSTM():
         self.epoch = options['epoch']
         self.batch_size = options['batch_size']
         self.init = options['layer_init']
+        self.pre_train_D = options['pre_train_D']
         self.G__init__()
         self.D__init__()
-        self.make_train(self.D, False)
-        gan_in = Input(batch_shape=(None, self.timesteps, self.features),
-                       dtype='float32')
-        H = self.G(gan_in)
-        gan_out = self.D(H)
-        self.GAN = Model(gan_in, gan_out)
-        self.GAN.compile(loss='categorical_crossentropy', optimizer='Adagrad')
+        self.GAN__init__()
         if self.plot:
             plot(self.GAN, to_file='model.png')
         # Save best weights to hdf5 file
@@ -106,30 +107,39 @@ class Source_Separation_LSTM():
                                             save_best_only=True)
 
     def G__init__(self):
-        mix = Input(batch_shape=(None, self.timesteps, self.features),
-                    dtype='float32')
-        lstm = LSTM(self.features, return_sequences=True, init=self.init)(mix)
-        lstm2 = LSTM(self.features, return_sequences=True, init=self.init)(lstm)
-        lstm2_drop = Dropout(self.drop)(lstm2)
-        self.G_out = TimeDistributed(Dense(self.features,
-                                     activation='relu',
-                                     init=self.init))(lstm2_drop)
-        self.G = Model(input=[mix], output=self.G_out)
-        self.G.compile(loss='categorical_crossentropy', optimizer='Adagrad')
+        mix = Input(shape=(self.timesteps, self.features), dtype='float32')
+        # GRU's yield similar performance but are more efficient than LSTM
+        l1 = GRU(self.features, return_sequences=True, activation='relu',
+                 init=self.init)(mix)
+        l1 = Dropout(self.drop)(l1)
+        l2 = GRU(self.features, return_sequences=True, activation='relu',
+                 init=self.init)(l1)
+        l2 = Dropout(self.drop)(l2)
+        d = TimeDistributed(Dense(self.features, init=self.init))(l1)
+        self.G = Model(input=mix, output=d)
+        self.G.compile(loss='mse', optimizer="Adagrad")
 
-    # Could pretrain D for faster convergence
     def D__init__(self):
-        inp = Input(batch_shape=(None, self.timesteps, self.features),
-                    dtype='float32')
-        d_1 = TimeDistributed(Dense(self.features, activation='relu',
-                                    init=self.init))(inp)
-        d_2 = TimeDistributed(Dense(100, activation='relu',
-                                    init=self.init))(d_1)
-        d_3 = Dropout(self.drop)(d_2)
+        inp = Input(shape=(self.timesteps, self.features), dtype='float32')
+        # without dropout D 50% -> 66% from pretraining
+        d_1 = TimeDistributed(Dense(50, activation='relu', init=self.init))(inp)
+        #d_1 = Dropout(self.drop)(d_1)
+        d_2 = TimeDistributed(Dense(50, activation='relu', init=self.init))(d_1)
+        #d_2 = Dropout(self.drop)(d_2)
+        d_3 = TimeDistributed(Dense(50, activation='relu', init=self.init))(d_2)
+        #d_3 = Dropout(self.drop)(d_3)
         d_v = TimeDistributed(Dense(1, activation='relu',
-                              init=self.init))(d_3)
+                                    init=self.init))(d_3)
         self.D = Model(inp, d_v)
-        self.D.compile(loss='categorical_crossentropy', optimizer='Adagrad')
+        self.D.compile(loss='binary_crossentropy', optimizer=Adagrad(lr=0.001, epsilon=1e-08),
+                       metrics=["accuracy"])
+
+    def GAN__init__(self):
+        self.GAN = Sequential()
+        self.GAN.add(self.G)
+        self.D.trainable = False
+        self.GAN.add(self.D)
+        self.GAN.compile(loss='binary_crossentropy', optimizer=Adagrad(lr=0.001, epsilon=1e-08))
 
     def h5_to_matrix(self, h5_file):
         with h5py.File(h5_file, 'r') as f:
@@ -171,10 +181,7 @@ if __name__ == "__main__":
     if options.load is False:
         print 'Training model'
         train_mixture, train_instr1 = model.h5_to_matrix('train_data.hdf5')
-        print 'Fitting model'
-        model.fit(train_mixture, train_instr1, valid_in=v_mixture,
-                  valid_out=v_instr1[0:800, :, :])
-        model.GAN.save_weights('weights.hdf5', overwrite=True)
+        model.fit(train_mixture, train_instr1)
     else:
         print 'Loading weights from weights.hdf5'
         model.load_weights('weights.hdf5')
