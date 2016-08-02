@@ -3,12 +3,12 @@ import librosa
 import numpy as np
 import os
 import h5py
-import random
+import scipy
 from optparse import OptionParser
 import sys
 from distutils.util import strtobool
 from options import get_opt
-
+import medleydb as mdb
 
 def user_query(question):
     print('%s [y/n]\n' % question)
@@ -23,28 +23,9 @@ class FeatureExtraction():
         self.instr = instruments
         self.dataset_dir = opt['d_path']
         self.n_fft = opt['n_fft']
-        self.song_dir = []
         self.timesteps = opt['timesteps']
         self.features = opt['features']
-        for x in os.listdir(self.dataset_dir):
-            xdir = os.listdir(self.dataset_dir + '/' + x)
-            # check if song has a file that contains mix and the
-            # 2 instruments that the features will be calculated
-            # for
-            if (any('mix' in word for word in xdir) and
-                    any(self.instr[0] in word for word in xdir)):
-                self.song_dir.append(x)
-        random.shuffle(self.song_dir)
-        print 'Number of songs found with mixture and instruments defined:' \
-              '{}'.format(len(self.song_dir))
-        # First half of list is training data
-        self.train_list = self.song_dir[0:int(len(self.song_dir)/2)]
-        # The next quater of list is test data
-        self.test_list = self.song_dir[int(len(self.song_dir)/2):
-                                       int(3*len(self.song_dir)/4)]
-        # The last quater of list is validation data
-        self.valid_list = self.song_dir[int(3*len(self.song_dir)/4):
-                                        len(self.song_dir)]
+        self.generate_dicts()
         if os.path.isfile('train_data.hdf5'):
             if user_query(('hdf5 data files already exist. Do you want to'
                           ' overwrite?')):
@@ -52,61 +33,107 @@ class FeatureExtraction():
                             self.test_h5 = h5py.File('test_data.hdf5', 'w')
                             self.valid_h5 = h5py.File('valid_data.hdf5', 'w')
             else:
-                sys.exit('No overwrite')
+                sys.exit('No overwrite, exiting')
         else:
             self.train_h5 = h5py.File('train_data.hdf5', 'w')
             self.test_h5 = h5py.File('test_data.hdf5', 'w')
             self.valid_h5 = h5py.File('valid_data.hdf5', 'w')
-        self.train_num = 0
-        self.test_num = 0
-        self.valid_num = 0
         self.write_h5s()
 
-    def load_file(self, h5_file, list):
-        num = 0
-        for fold in list:
-            list_ = os.listdir(self.dataset_dir + fold)
-            print 'Reading in ' + fold
-            # Store features for each instrument in the songs subgroup
-            grp = h5_file.create_group(fold)
-            mix, instr1 = False, False
-            for file in list_:
-                file_path = self.dataset_dir + fold + '/' + file
-                if 'mix' in file and mix is False:
-                    mix = True
-                    S, sr_ = self.get_data(file_path)
-                    conc = np.hstack((S.real, S.imag))
-                    conc = np.reshape(conc, (-1, self.timesteps, self.features))
-                    num += conc.shape[0]
-                    grp['mix'] = conc
-                if self.instr[0] in file and instr1 is False:
-                    print file
-                    instr1 = True
-                    S, sr_ = self.get_data(file_path)
-                    conc = np.hstack((S.real, S.imag))
-                    conc = np.reshape(conc, (-1, self.timesteps, self.features))
-                    grp[self.instr[0]] = conc
-        return num
+    def generate_dicts(self):
+        "Generate lists of folders that contain the data."
+        instr_files = mdb.get_files_for_instrument(self.instr[0])
+        instr_list = list(instr_files)[0:30]
+        print 'Number of songs found with mixture and instruments defined:' \
+              '{}'.format(len(instr_list))
+        mix_list = []
+        # Check it works with 20 files first
+        for x in instr_list:
+            base_file = os.path.dirname(os.path.dirname(x))
+            for file in os.listdir(base_file):
+                # Some hidden files start with ._ then mixture
+                if 'MIX' in file and '._' not in file:
+                    mix_list.append(base_file + '/' + file)
+                    break
+        # Randomly shuffle mix & instr
+        comb = zip(mix_list, instr_list)
+        np.random.shuffle(comb)
+        mix_list[:], instr_list[:] = zip(*comb)
+
+        self.train_dict = {
+                           'mix': mix_list[0:int(len(mix_list)/2)],
+                           'instr': instr_list[0:int(len(mix_list)/2)]
+                           }
+        self.test_dict = {
+                           'mix': mix_list[int(len(mix_list)/2):
+                                           int(3*len(mix_list)/4)],
+                           'instr': instr_list[int(len(mix_list)/2):
+                                               int(3*len(mix_list)/4)]
+                           }
+        self.valid_dict = {
+                           'mix': mix_list[int(3*len(mix_list)/4):
+                                           len(mix_list)],
+                           'instr': instr_list[int(3*len(mix_list)/4):
+                                               len(mix_list)]
+                           }
+
+    def write_file(self, h5_file, dict):
+        mix = dict['mix']
+        instr = dict['instr']
+        mix_data_lst = []
+        instr_data_lst = []
+        num_samples = 0
+        if len(mix) != len(instr):
+            sys.exit('Error: mixture and instruments have different number'
+                     'of elements.')
+        for i in range(len(mix)):
+            print 'Reading in ' + mix[i]
+            S_m, sr_ = self.get_data(mix[i])
+            S_i, sr_ = self.get_data(instr[i])
+
+            conc_m = np.hstack((S_m.real, S_m.imag))
+            conc_m = np.reshape(conc_m, (-1, self.timesteps, self.features))
+            conc_i = np.hstack((S_i.real, S_i.imag))
+            conc_i = np.reshape(conc_i, (-1, self.timesteps, self.features))
+            num_samples += conc_m.shape[0]
+
+            mix_data_lst.append(conc_m)
+            instr_data_lst.append(conc_i)
+
+        mix_out = self.lst_to_matrix(mix_data_lst, num_samples)
+        instr_out = self.lst_to_matrix(instr_data_lst, num_samples)
+        m_dset = h5_file.create_dataset("mixture", data=mix_out, chunks=True)
+        i_dset = h5_file.create_dataset("instr", data=instr_out, chunks=True)
+        h5_file['file_names'] = mix
+
+    def lst_to_matrix(self, lst, num):
+        out = np.empty((num, self.timesteps, self.features))
+        start = 0
+        end = 0
+        for d in lst:
+            end += d.shape[0]
+            out[start:end, :, :] = d
+            start += d.shape[0]
+        return out
 
     def write_h5s(self):
         print 'Processing Training dataset...'
-        self.train_num = self.load_file(self.train_h5, self.train_list)
+        self.write_file(self.train_h5, self.train_dict)
         print 'Processing  Testing dataset...'
-        self.test_num = self.load_file(self.test_h5, self.test_list)
+        self.write_file(self.test_h5, self.test_dict)
         print 'Processing  Validation dataset...'
-        self.valid_num = self.load_file(self.valid_h5, self.valid_list)
-        self.train_h5['count'] = self.train_num
-        self.test_h5['count'] = self.test_num
-        self.valid_h5['count'] = self.valid_num
+        self.write_file(self.valid_h5, self.valid_dict)
         self.train_h5.close()
         self.test_h5.close()
         self.valid_h5.close()
 
     def get_data(self, file):
-        """Read in data from all .wav files inside folder & computes STFT."""
+        """Read in audio file and computes STFT."""
         y, sr_ = librosa.load(file, duration=120)
-        y_harm, y_perc = librosa.effects.hpss(y)
-        S = librosa.core.stft(y=y_harm, n_fft=self.n_fft).transpose()
+        if y.shape[0] < 2000000:
+            y, sr_ = librosa.load(file, duration=30)
+        # y_harm, y_perc = librosa.effects.hpss(y)
+        S = librosa.core.stft(y=y, n_fft=self.n_fft).transpose()
         return S, sr_
 
 
