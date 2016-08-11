@@ -1,103 +1,29 @@
 """GAN to separate instruments from a mixture."""
 import numpy as np
+from keras import backend as K
 from keras.models import Model, Sequential
-from keras.layers import Dense, TimeDistributed, LSTM, Input, Dropout, \
-                         Convolution1D, Flatten, GRU
+from keras.layers import Dense, TimeDistributed, Dropout, GRU, \
+                         BatchNormalization
 from keras.utils.visualize_util import plot
-from keras.layers.advanced_activations import LeakyReLU
 from keras.objectives import mean_squared_error
 from keras.optimizers import Adagrad
-from keras.callbacks import ModelCheckpoint  # , EarlyStopping
 import h5py
-import librosa
+import mir_eval
 from optparse import OptionParser
 from options import get_opt
-from scipy import io
+from scipy.io import wavfile
 import time
+import librosa
+import cPickle as pickle
+
 
 class Source_Separation_LSTM():
     """Class that separates instruments from a mixture using LSTM."""
-
-    def objective_1(self, out1_true, out1_pred):
-        """First objective function.
-
-        Using mean squared error between the true and predicted values & the
-        difference between predicted out1 and true out2 to make out1 and out2
-        as different as possible.
-        """
-        mse = mean_squared_error(out1_true, out1_pred)
-        diff = mean_squared_error(out1_pred, self.out2_true)
-        return mse - self.gamma * diff
-
-    def objective_2(self, out2_true, out2_pred):
-        """Second objective function.
-
-        Using mean squared error between the true and predicted values & the
-        difference between predicted out2 and true out1 to make out1 and out2
-        as different as possible.
-        """
-        mse = mean_squared_error(out2_true, out2_pred)
-        diff = mean_squared_error(out2_pred, self.out1_true)
-        return mse - self.gamma * diff
-
-    # add validation for early stopping
-    def fit(self, input, out1_true, valid_in, valid_out):
-        """Train neural network given input data and corresponding output."""
-        start_time = time.time()
-        y = np.concatenate((np.ones((self.batch_size, self.timesteps, 1)),
-                            np.zeros((self.batch_size, self.timesteps, 1))))
-        if self.pre_train_D:
-            ind = np.random.permutation(400)
-            predi = self.G.predict(input[0:400])
-            y2 = np.concatenate((np.ones((400, self.timesteps, 1)),
-                                np.zeros((400, self.timesteps, 1))))
-            d2 = np.concatenate((input[0:400], predi))
-            self.D.fit(d2, y2, batch_size=self.batch_size, nb_epoch=5)
-        self.g_loss_valid = []
-        self.g_loss_valid.append(float('Inf'))
-        for epoch in range(self.epoch):
-            print "Epoch: {}".format(epoch)
-            p = np.random.permutation(input.shape[0]-1)
-            start = 0
-            end = 0
-
-            while len(p) - end > self.batch_size:
-                end += self.batch_size
-                ind = p[start:end]
-                self.batch = input[ind, :, :]
-                batch_out = out1_true[ind, :, :]
-                g_loss = self.G.train_on_batch(self.batch, batch_out)
-                #self.pred = self.G.predict(self.batch)
-                #D_in = np.concatenate((self.batch, self.pred))
-                #self.D.trainable = True
-                #d_loss = self.D.train_on_batch(D_in, y)
-                #self.D.trainable = False
-                #self.GAN.train_on_batch(self.batch, np.zeros((self.batch_size, self.timesteps, 1)))
-                print "d_loss: {}, g_loss: {}".format(0, g_loss)
-                start += self.batch_size
-            valid_loss = (self.G.evaluate(valid_in, valid_out, batch_size=64))
-            if (min(self.g_loss_valid) > valid_loss):
-                print "Saving weights, validation loss improved to {}".format(valid_loss)
-                self.GAN.save_weights("weights.hdf5", overwrite=True)
-            self.g_loss_valid.append(valid_loss)
-            print "Elapsed time: {}".format(time.time()-start_time)
-        np.save("Validation_losses", self.g_loss_valid)
-
-    def predict(self, test, batch_size):
-        """Predict output given input using neural network."""
-        out1 = self.G.predict(test, batch_size)
-        return out1
-
-    def load_weights(self, path):
-        """Load weights from saved weights file in hdf5."""
-        self.GAN.load_weights(path)
 
     def __init__(self, options):
         """Initialise network structure."""
         self.timesteps = options['timesteps']
         self.features = options['features']
-        self.out1_true = 0
-        self.out2_true = 0
         self.gamma = options['gamma']
         self.drop = options['dropout']
         self.plot = options['plot']
@@ -105,43 +31,125 @@ class Source_Separation_LSTM():
         self.batch_size = options['batch_size']
         self.init = options['layer_init']
         self.pre_train_D = options['pre_train_D']
-        self.G__init__()
+        self.num_GRU = options["GRU_layers"]
+        self.is_mir_eval = options["IS_MIR_EVAL"]
+        self.mir_eval = {'SAR': [],
+                         'SIR': [],
+                         'SDR': []}
+        self.batch = np.zeros((self.batch_size, self.timesteps, self.features))
         self.D__init__()
+        self.G__init__()
         self.GAN__init__()
         if self.plot:
             plot(self.GAN, to_file='model.png')
-        # Save best weights to hdf5 file
-        self.checkpointer = ModelCheckpoint(filepath="weights.hdf5", verbose=1,
-                                            save_best_only=True)
+
+    def objective(self, out_true, out_pred):
+        mse = mean_squared_error(out_true, out_pred)
+        return mse
+
+    def train_on_batch(self, batch_in, batch_out):
+        y = np.concatenate((np.ones((self.batch_size, self.timesteps, 1)),
+                            np.zeros((self.batch_size, self.timesteps, 1))))
+        self.pred = self.G.predict(self.batch)
+        g_loss = self.G.train_on_batch(self.batch, batch_out)
+        D_in = np.concatenate((batch_out, self.pred))
+        d_loss = self.D.train_on_batch(D_in, y)
+        y_train = np.ones((self.batch_size, self.timesteps, 1))
+        GAN_loss = self.GAN.train_on_batch(self.batch, y_train)
+        print "d_loss: {}, g_loss: {}, GAN_loss: {}".format(d_loss[1],
+                                                            g_loss,
+                                                            GAN_loss)
+
+    def update_mir_eval(self, true_out, pred_out):
+        out = self.time_signal(true_out)
+        pred = self.time_signal(pred_out)
+        if self.epoch % 10 == 0:
+            stri = 'Output/Epoch' + str(self.epoch) + '.wav'
+            wavfile.write(stri, 22050, pred)
+        if self.is_mir_eval:
+            (sdr, sir, sar, _) = mir_eval.separation.bss_eval_sources(out, pred)
+            print "SDR: {}, SIR: {}, SAR: {}".format(sdr, sir, sar)
+            self.mir_eval['SDR'].append(sdr)
+            self.mir_eval['SIR'].append(sir)
+            self.mir_eval['SAR'].append(sar)
+            with open('MIR_eval_values.pickle', 'wb') as handle:
+                pickle.dump(self.mir_eval, handle)\
+
+    def pre_trainD(self, input, output):
+        self.D.trainable = True
+        n_samples = input.shape[0]
+        pred = self.G.predict(input)
+        y = np.concatenate((np.ones((n_samples, self.timesteps, 1)),
+                            np.zeros((n_samples, self.timesteps, 1))))
+        x = np.concatenate((output, pred))
+        self.D.fit(x, y, batch_size=self.batch_size, nb_epoch=1)
+        self.D.trainable = False
+
+    def fit(self, input, out1_true, valid_in, valid_out):
+        """Train neural network given input data and corresponding output."""
+        start_time = time.time()
+        if self.pre_train_D:
+            self.pre_trainD(input[0:2000], out1_true[0:2000])
+        d_loss = [2, 0.5]
+        self.g_loss_valid = []
+        self.g_loss_valid.append(float('Inf'))
+        for epoch in range(self.epoch):
+            self.epoch = epoch
+            print "Epoch: {}".format(epoch)
+            p = np.random.permutation(input.shape[0]-1)
+            start, end = 0, 0
+            while len(p) - end > self.batch_size:
+                end += self.batch_size
+                ind = p[start:end]
+                self.batch = input[ind, :, :]
+                batch_out = out1_true[ind, :, :]
+                self.train_on_batch(self.batch, batch_out)
+                start += self.batch_size
+            G_val_loss = self.G.evaluate(valid_in, valid_out,
+                                         batch_size=self.batch_size)
+            d_label = np.ones((valid_in.shape[0], self.timesteps, 1))
+            GAN_val_loss = self.GAN.evaluate(valid_in, d_label, self.batch_size)
+            valid_pred = self.G.predict(valid_in, batch_size=self.batch_size)
+            valid_loss = G_val_loss #+ GAN_val_loss
+            if (min(self.g_loss_valid) > valid_loss):
+                print "Saving weights, validation loss improved to {}".format(valid_loss)
+                self.G.save_weights("bestweights.hdf5", overwrite=True)
+            else:
+                print "Validation loss: {}".format(valid_loss)
+            self.G.save_weights("weights.hdf5", overwrite=True)
+            self.g_loss_valid.append(valid_loss)
+            self.update_mir_eval(valid_out, valid_pred)
+            np.save('loss_values.npy', self.g_loss_valid)
+            print "Elapsed time: {}".format(time.time()-start_time)
+
+    def predict(self, test, batch_size):
+        """Predict output given input using G."""
+        out1 = self.G.predict(test, batch_size)
+        return out1
+
+    def load_weights(self, path):
+        """Load weights from saved weights file in hdf5."""
+        self.GAN.load_weights(path)
 
     def G__init__(self):
-        mix = Input(shape=(self.timesteps, self.features), dtype='float32')
-        # GRU's yield similar performance but are more efficient than LSTM
-        l1 = GRU(self.features, return_sequences=True, activation='relu',
-                 init=self.init)(mix)
-        l1 = Dropout(self.drop)(l1)
-        l2 = GRU(2000, return_sequences=True, activation='relu',
-                 init=self.init)(l1)
-        l2 = Dropout(self.drop)(l2)
-        l3 = GRU(self.features, return_sequences=True, activation='relu',
-                 init=self.init)(l2)
-        l3 = Dropout(self.drop)(l3)
-        d = TimeDistributed(Dense(self.features, init=self.init))(l2)
-        self.G = Model(input=mix, output=d)
-        self.G.compile(loss='mse', optimizer=Adagrad(lr=0.0001, epsilon=1e-08))
+        self.G = Sequential()
+        self.G.add(TimeDistributed(Dense(self.features, init=self.init), input_shape=(self.timesteps, self.features)))
+        for layer in range(self.num_GRU):
+            self.G.add(GRU(513, return_sequences=True))
+        self.G.add(TimeDistributed(Dense(self.features, init=self.init)))
+        self.G.compile(loss=self.objective, optimizer=Adagrad(lr=0.001, epsilon=1e-08))
 
     def D__init__(self):
-        inp = Input(shape=(self.timesteps, self.features), dtype='float32')
-        # without dropout D 50% -> 66% from pretraining
-        d_1 = TimeDistributed(Dense(50, activation='relu', init=self.init))(inp)
-        #d_1 = Dropout(self.drop)(d_1)
-        d_2 = TimeDistributed(Dense(50, activation='relu', init=self.init))(d_1)
-        #d_2 = Dropout(self.drop)(d_2)
-        d_3 = TimeDistributed(Dense(50, activation='relu', init=self.init))(d_2)
-        #d_3 = Dropout(self.drop)(d_3)
-        d_v = TimeDistributed(Dense(1, activation='relu',
-                                    init=self.init))(d_3)
-        self.D = Model(inp, d_v)
+        self.D = Sequential()
+        self.D.add(TimeDistributed(Dense(self.features, activation='relu',
+                                         init=self.init),
+                                   input_shape=(self.timesteps,
+                                                self.features)))
+        self.D.add(Dropout(self.drop))
+        self.D.add(TimeDistributed(Dense(513, activation='relu',
+                                         init=self.init)))
+        self.D.add(TimeDistributed(Dense(1, activation='sigmoid',
+                                         init=self.init)))
         self.D.compile(loss='binary_crossentropy', optimizer=Adagrad(lr=0.001, epsilon=1e-08),
                        metrics=["accuracy"])
 
@@ -167,6 +175,12 @@ class Source_Separation_LSTM():
         out = real + im * 1j
         return out
 
+    def time_signal(self, input):
+        "Turn input or output into time signal."
+        x = np.reshape(input, (-1, self.features)).transpose()
+        x = self.conc_to_complex(x)
+        return librosa.core.istft(x)
+
 if __name__ == "__main__":
     parse = OptionParser()
     parse.add_option('--load', '-l', action='store_true', dest='load',
@@ -174,32 +188,19 @@ if __name__ == "__main__":
     (options, args) = parse.parse_args()
     print 'Initialising model'
     model = Source_Separation_LSTM(get_opt())
-    v_mixture, v_instr1 = model.open_h5('valid_data.hdf5')
+    v_mixture, v_instr = model.open_h5('valid_data.hdf5')
     if options.load is False:
         print 'Training model'
-        train_mixture, train_instr1 = model.open_h5('train_data.hdf5')
-        model.fit(train_mixture, train_instr1, v_mixture, v_instr1)
+        train_mixture, train_instr = model.open_h5('train_data.hdf5')
+        wavfile.write('train_x.wav', 22050, model.time_signal(train_mixture))
+        wavfile.write('train_y.wav', 22050, model.time_signal(train_instr))
+        model.fit(train_mixture, train_instr, v_mixture, v_instr)
     else:
         print 'Loading weights from weights.hdf5'
-        model.load_weights('weights.hdf5')
+        model.G.load_weights('weights.hdf5')
 
     print "Predicting on validation data"
-    out1 = model.predict(v_mixture, batch_size=64)
-
-    testinstr1 = np.reshape(v_instr1, (v_instr1.shape[0]*model.timesteps, model.features)).transpose()
-    mix = np.reshape(v_mixture, (v_mixture.shape[0]*model.timesteps, model.features)).transpose()
-    out1 = np.reshape(out1, (out1.shape[0]*model.timesteps, model.features)).transpose()
-    mixcomp = model.conc_to_complex(mix)
-    test1comp = model.conc_to_complex(testinstr1)
-    out1_comp = model.conc_to_complex(out1)
-
-    instr1_softmask = librosa.util.softmask(np.absolute(test1comp), np.absolute(mixcomp), power=2)
-    out1_comp = out1_comp * instr1_softmask
-
-    mp31 = librosa.core.istft(out1_comp)
-    intr1 = librosa.core.istft(test1comp)
-    mix = librosa.core.istft(mixcomp)
-
-    io.wavfile.write('test_out1.wav', 22050, mp31)
-    io.wavfile.write('mix.wav', 22050, mix)
-    io.wavfile.write('test1.wav', 22050, intr1)
+    out = model.predict(v_mixture, batch_size=64)
+    wavfile.write('test_out.wav', 22050, model.time_signal(out))
+    wavfile.write('mix.wav', 22050, model.time_signal(v_mixture-out))
+    wavfile.write('test.wav', 22050, model.time_signal(v_instr))

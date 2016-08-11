@@ -9,6 +9,8 @@ import sys
 from distutils.util import strtobool
 from options import get_opt
 import medleydb as mdb
+import math
+import sklearn as sk
 
 def user_query(question):
     print('%s [y/n]\n' % question)
@@ -25,6 +27,8 @@ class FeatureExtraction():
         self.n_fft = opt['n_fft']
         self.timesteps = opt['timesteps']
         self.features = opt['features']
+        self.mix_scaler = sk.preprocessing.StandardScaler()
+        self.instr_scaler = sk.preprocessing.StandardScaler()
         self.generate_dicts()
         if os.path.isfile('train_data.hdf5'):
             if user_query(('hdf5 data files already exist. Do you want to'
@@ -43,7 +47,7 @@ class FeatureExtraction():
     def generate_dicts(self):
         "Generate lists of folders that contain the data."
         instr_files = mdb.get_files_for_instrument(self.instr[0])
-        instr_list = list(instr_files)[0:30]
+        instr_list = list(instr_files)
         print 'Number of songs found with mixture and instruments defined:' \
               '{}'.format(len(instr_list))
         mix_list = []
@@ -77,7 +81,7 @@ class FeatureExtraction():
                                                len(mix_list)]
                            }
 
-    def write_file(self, h5_file, dict):
+    def write_file(self, h5_file, dict, mode):
         mix = dict['mix']
         instr = dict['instr']
         mix_data_lst = []
@@ -87,21 +91,46 @@ class FeatureExtraction():
             sys.exit('Error: mixture and instruments have different number'
                      'of elements.')
         for i in range(len(mix)):
-            print 'Reading in ' + mix[i]
+            print 'Reading in ' + instr[i]
             S_m, sr_ = self.get_data(mix[i])
             S_i, sr_ = self.get_data(instr[i])
 
-            conc_m = np.hstack((S_m.real, S_m.imag))
-            conc_m = np.reshape(conc_m, (-1, self.timesteps, self.features))
-            conc_i = np.hstack((S_i.real, S_i.imag))
-            conc_i = np.reshape(conc_i, (-1, self.timesteps, self.features))
-            num_samples += conc_m.shape[0]
+            # numsamples is the most samples of length self.timesteps that
+            # sample can have
+            numsamples = math.trunc(S_m.shape[0] / self.timesteps)
+            if numsamples != 0:
+                S_m = S_m[0:numsamples*self.timesteps, :]
+                S_i = S_i[0:numsamples*self.timesteps, :]
+                conc_m = np.hstack((S_m.real, S_m.imag))
+                conc_m = np.reshape(conc_m, (-1, self.timesteps,
+                                             self.features))
+                conc_i = np.hstack((S_i.real, S_i.imag))
+                conc_i = np.reshape(conc_i, (-1, self.timesteps,
+                                             self.features))
+                num_samples += conc_m.shape[0]
 
-            mix_data_lst.append(conc_m)
-            instr_data_lst.append(conc_i)
+                mix_data_lst.append(conc_m)
+                instr_data_lst.append(conc_i)
 
         mix_out = self.lst_to_matrix(mix_data_lst, num_samples)
         instr_out = self.lst_to_matrix(instr_data_lst, num_samples)
+        if mode == 'train' or 'valid':
+            del_ind = []
+            for i in range(instr_out.shape[0]):
+                if np.all(instr_out[i, :, :] == 0):
+                    del_ind.append(i)
+            print "Deleting {} empty samples from {}".format(len(del_ind), mode)
+            instr_out = np.delete(instr_out, del_ind, axis=0)
+            mix_out = np.delete(mix_out, del_ind, axis=0)
+        #if mode == 'train':
+        #    print 'Fitting StandardScaler'
+        #    for i in range(mix_out.shape[0]):
+        #        self.mix_scaler.partial_fit(mix_out[i, :, :])
+        #        self.instr_scaler.partial_fit(instr_out[i, :, :])
+        #for i in range(mix_out.shape[0]):
+        #    mix_out[i, :, :] = self.mix_scaler.transform(mix_out[i, :, :])
+        #    instr_out[i, :, :] = self.instr_scaler.transform(instr_out[i, :, :])
+        print "{} samples".format(instr_out.shape[0])
         m_dset = h5_file.create_dataset("mixture", data=mix_out, chunks=True)
         i_dset = h5_file.create_dataset("instr", data=instr_out, chunks=True)
         h5_file['file_names'] = mix
@@ -118,21 +147,18 @@ class FeatureExtraction():
 
     def write_h5s(self):
         print 'Processing Training dataset...'
-        self.write_file(self.train_h5, self.train_dict)
+        self.write_file(self.train_h5, self.train_dict, 'train')
         print 'Processing  Testing dataset...'
-        self.write_file(self.test_h5, self.test_dict)
+        self.write_file(self.test_h5, self.test_dict, 'test')
         print 'Processing  Validation dataset...'
-        self.write_file(self.valid_h5, self.valid_dict)
+        self.write_file(self.valid_h5, self.valid_dict, 'valid')
         self.train_h5.close()
         self.test_h5.close()
         self.valid_h5.close()
 
     def get_data(self, file):
         """Read in audio file and computes STFT."""
-        y, sr_ = librosa.load(file, duration=120)
-        if y.shape[0] < 2000000:
-            y, sr_ = librosa.load(file, duration=30)
-        # y_harm, y_perc = librosa.effects.hpss(y)
+        y, sr_ = librosa.load(file)
         S = librosa.core.stft(y=y, n_fft=self.n_fft).transpose()
         return S, sr_
 
