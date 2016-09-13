@@ -1,6 +1,7 @@
 """GAN to separate instruments from a mixture."""
 import numpy as np
 from keras import backend as K
+import theano
 from keras.models import Model, Sequential
 from keras.layers import Dense, TimeDistributed, Dropout, GRU, \
                          BatchNormalization
@@ -22,6 +23,7 @@ class Source_Separation_LSTM():
 
     def __init__(self, options):
         """Initialise network structure."""
+        # Pre-define batch for use in objective function feature_matching
         self.timesteps = options['timesteps']
         self.features = options['features']
         self.gamma = options['gamma']
@@ -33,6 +35,9 @@ class Source_Separation_LSTM():
         self.pre_train_D = options['pre_train_D']
         self.num_GRU = options["GRU_layers"]
         self.is_mir_eval = options["IS_MIR_EVAL"]
+        self.G_lr = options["G_lr"]
+        self.D_lr = options["D_lr"]
+        self.GAN_lr = options["GAN_lr"]
         self.mir_eval = {'SAR': [],
                          'SIR': [],
                          'SDR': []}
@@ -43,47 +48,54 @@ class Source_Separation_LSTM():
         if self.plot:
             plot(self.GAN, to_file='model.png')
 
+    def G__init__(self):
+        self.G = Sequential()
+        self.G.add(TimeDistributed(Dense(self.features, init=self.init), input_shape=(self.timesteps, self.features)))
+        for layer in range(self.num_GRU):
+            self.G.add(GRU(513, return_sequences=True))
+        self.G.add(TimeDistributed(Dense(self.features, init=self.init)))
+        self.G.compile(loss=self.objective, optimizer=Adagrad(lr=self.G_lr,
+                                                              epsilon=1e-08))
+
+    def D__init__(self):
+        self.D = Sequential()
+        self.D.add(TimeDistributed(Dense(self.features, activation='relu',
+                                         init=self.init),
+                                   input_shape=(self.timesteps,
+                                                self.features)))
+        self.D.add(Dropout(self.drop))
+        self.D.add(TimeDistributed(Dense(513, activation='relu',
+                                         init=self.init)))
+        self.D.add(TimeDistributed(Dense(1, activation='sigmoid',
+                                         init=self.init)))
+        self.D.compile(loss='binary_crossentropy',
+                       optimizer=Adagrad(lr=self.D_lr, epsilon=1e-08),
+                       metrics=["accuracy"])
+
+    def GAN__init__(self):
+        self.GAN = Sequential()
+        self.GAN.add(self.G)
+        self.D.trainable = False
+        self.GAN.add(self.D)
+        self.GAN.compile(loss='binary_crossentropy',
+                         optimizer=Adagrad(lr=self.GAN_lr, epsilon=1e-08))
+
     def objective(self, out_true, out_pred):
         mse = mean_squared_error(out_true, out_pred)
         return mse
 
-    def train_on_batch(self, batch_in, batch_out):
-        y = np.concatenate((np.ones((self.batch_size, self.timesteps, 1)),
-                            np.zeros((self.batch_size, self.timesteps, 1))))
-        self.pred = self.G.predict(self.batch)
-        g_loss = self.G.train_on_batch(self.batch, batch_out)
-        D_in = np.concatenate((batch_out, self.pred))
-        d_loss = self.D.train_on_batch(D_in, y)
-        y_train = np.ones((self.batch_size, self.timesteps, 1))
-        GAN_loss = self.GAN.train_on_batch(self.batch, y_train)
-        print "d_loss: {}, g_loss: {}, GAN_loss: {}".format(d_loss[1],
-                                                            g_loss,
-                                                            GAN_loss)
-
-    def update_mir_eval(self, true_out, pred_out):
-        out = self.time_signal(true_out)
-        pred = self.time_signal(pred_out)
-        if self.epoch % 10 == 0:
-            stri = 'Output/Epoch' + str(self.epoch) + '.wav'
-            wavfile.write(stri, 22050, pred)
-        if self.is_mir_eval:
-            (sdr, sir, sar, _) = mir_eval.separation.bss_eval_sources(out, pred)
-            print "SDR: {}, SIR: {}, SAR: {}".format(sdr, sir, sar)
-            self.mir_eval['SDR'].append(sdr)
-            self.mir_eval['SIR'].append(sir)
-            self.mir_eval['SAR'].append(sar)
-            with open('MIR_eval_values.pickle', 'wb') as handle:
-                pickle.dump(self.mir_eval, handle)\
-
-    def pre_trainD(self, input, output):
-        self.D.trainable = True
-        n_samples = input.shape[0]
-        pred = self.G.predict(input)
-        y = np.concatenate((np.ones((n_samples, self.timesteps, 1)),
-                            np.zeros((n_samples, self.timesteps, 1))))
-        x = np.concatenate((output, pred))
-        self.D.fit(x, y, batch_size=self.batch_size, nb_epoch=1)
-        self.D.trainable = False
+    # not quite working
+    def feature_matching(self, out_true, out_pred):
+        "Feature matching objective function for use in G."
+        mse = mean_squared_error(out_true, out_pred)
+        activations = K.function([self.D.layers[0].input, K.learning_phase()],
+                                  [self.D.layers[1].output,])
+        # Inputs to theano functions must be numeric not tensors like out_true
+        pred_batch = self.D.predict(self.batch, batch_size=self.batch_size)
+        pred_activ = activations([pred_batch, 0])[0]
+        true_activ = activations([self.batch, 0])[0]
+        feat_match = mean_squared_error(true_activ, pred_activ)
+        return mse + self.gamma * feat_match
 
     def fit(self, input, out1_true, valid_in, valid_out):
         """Train neural network given input data and corresponding output."""
@@ -110,7 +122,7 @@ class Source_Separation_LSTM():
             d_label = np.ones((valid_in.shape[0], self.timesteps, 1))
             GAN_val_loss = self.GAN.evaluate(valid_in, d_label, self.batch_size)
             valid_pred = self.G.predict(valid_in, batch_size=self.batch_size)
-            valid_loss = G_val_loss #+ GAN_val_loss
+            valid_loss = G_val_loss
             if (min(self.g_loss_valid) > valid_loss):
                 print "Saving weights, validation loss improved to {}".format(valid_loss)
                 self.G.save_weights("bestweights.hdf5", overwrite=True)
@@ -122,6 +134,46 @@ class Source_Separation_LSTM():
             np.save('loss_values.npy', self.g_loss_valid)
             print "Elapsed time: {}".format(time.time()-start_time)
 
+    def train_on_batch(self, batch_in, batch_out):
+        y = np.concatenate((np.ones((self.batch_size, self.timesteps, 1)),
+                            np.zeros((self.batch_size, self.timesteps, 1))))
+        self.pred = self.G.predict(self.batch)
+        g_loss = self.G.train_on_batch(self.batch, batch_out)
+        D_in = np.concatenate((batch_out, self.pred))
+        d_loss = self.D.train_on_batch(D_in, y)
+        y_train = np.ones((self.batch_size, self.timesteps, 1))
+        GAN_loss = self.GAN.train_on_batch(self.batch, y_train)
+        print "d_loss: {}, g_loss: {}, GAN_loss: {}".format(d_loss[1],
+                                                            g_loss,
+                                                            GAN_loss)
+
+    def update_mir_eval(self, true_out, pred_out):
+        if self.epoch % 10 == 0 or self.is_mir_eval:
+            pred = self.time_signal(pred_out)
+        if self.epoch % 10 == 0:
+            stri = 'Output/Epoch' + str(self.epoch) + '.wav'
+            wavfile.write(stri, 22050, pred)
+        if self.is_mir_eval:
+            out = self.time_signal(true_out)
+            (sdr, sir, sar, _) = mir_eval.separation.bss_eval_sources(out, pred)
+            print "SDR: {}, SIR: {}, SAR: {}".format(sdr, sir, sar)
+            self.mir_eval['SDR'].append(sdr)
+            self.mir_eval['SIR'].append(sir)
+            self.mir_eval['SAR'].append(sar)
+            with open('MIR_eval_values.pickle', 'wb') as handle:
+                pickle.dump(self.mir_eval, handle)
+
+    def pre_trainD(self, input, output):
+        self.D.trainable = True
+        n_samples = input.shape[0]
+        pred = self.G.predict(input)
+        y = np.concatenate((np.ones((n_samples, self.timesteps, 1)),
+                            np.zeros((n_samples, self.timesteps, 1))))
+        x = np.concatenate((output, pred))
+        self.D.fit(x, y, batch_size=self.batch_size, nb_epoch=1)
+        self.D.trainable = False
+
+
     def predict(self, test, batch_size):
         """Predict output given input using G."""
         out1 = self.G.predict(test, batch_size)
@@ -130,35 +182,6 @@ class Source_Separation_LSTM():
     def load_weights(self, path):
         """Load weights from saved weights file in hdf5."""
         self.GAN.load_weights(path)
-
-    def G__init__(self):
-        self.G = Sequential()
-        self.G.add(TimeDistributed(Dense(self.features, init=self.init), input_shape=(self.timesteps, self.features)))
-        for layer in range(self.num_GRU):
-            self.G.add(GRU(513, return_sequences=True))
-        self.G.add(TimeDistributed(Dense(self.features, init=self.init)))
-        self.G.compile(loss=self.objective, optimizer=Adagrad(lr=0.001, epsilon=1e-08))
-
-    def D__init__(self):
-        self.D = Sequential()
-        self.D.add(TimeDistributed(Dense(self.features, activation='relu',
-                                         init=self.init),
-                                   input_shape=(self.timesteps,
-                                                self.features)))
-        self.D.add(Dropout(self.drop))
-        self.D.add(TimeDistributed(Dense(513, activation='relu',
-                                         init=self.init)))
-        self.D.add(TimeDistributed(Dense(1, activation='sigmoid',
-                                         init=self.init)))
-        self.D.compile(loss='binary_crossentropy', optimizer=Adagrad(lr=0.001, epsilon=1e-08),
-                       metrics=["accuracy"])
-
-    def GAN__init__(self):
-        self.GAN = Sequential()
-        self.GAN.add(self.G)
-        self.D.trainable = False
-        self.GAN.add(self.D)
-        self.GAN.compile(loss='binary_crossentropy', optimizer=Adagrad(lr=0.001, epsilon=1e-08))
 
     def open_h5(self, h5_file):
         with h5py.File(h5_file, 'r') as f:
@@ -200,7 +223,7 @@ if __name__ == "__main__":
         model.G.load_weights('weights.hdf5')
 
     print "Predicting on validation data"
-    out = model.predict(v_mixture, batch_size=64)
+    out = model.predict(v_mixture, batch_size=128)
     wavfile.write('test_out.wav', 22050, model.time_signal(out))
     wavfile.write('mix.wav', 22050, model.time_signal(v_mixture-out))
     wavfile.write('test.wav', 22050, model.time_signal(v_instr))

@@ -22,8 +22,8 @@ def user_query(question):
 
 class FeatureExtraction():
     def __init__(self, opt, instruments):
+        print(mdb.get_valid_instrument_labels())
         self.instr = instruments
-        self.dataset_dir = opt['d_path']
         self.n_fft = opt['n_fft']
         self.timesteps = opt['timesteps']
         self.features = opt['features']
@@ -47,15 +47,18 @@ class FeatureExtraction():
     def generate_dicts(self):
         "Generate lists of folders that contain the data."
         instr_files = mdb.get_files_for_instrument(self.instr[0])
-        instr_list = list(instr_files)
+        tempinstr = list(instr_files)[0:30]
+        instr_list = []
+        for song in tempinstr:
+            if 'Rockabilly' not in song:
+                instr_list.append(song)
         print 'Number of songs found with mixture and instruments defined:' \
               '{}'.format(len(instr_list))
         mix_list = []
-        # Check it works with 20 files first
         for x in instr_list:
             base_file = os.path.dirname(os.path.dirname(x))
             for file in os.listdir(base_file):
-                # Some hidden files start with ._ then mixture
+                # Some files start with ._ then mixture
                 if 'MIX' in file and '._' not in file:
                     mix_list.append(base_file + '/' + file)
                     break
@@ -105,6 +108,7 @@ class FeatureExtraction():
                 conc_m = np.reshape(conc_m, (-1, self.timesteps,
                                              self.features))
                 conc_i = np.hstack((S_i.real, S_i.imag))
+                print conc_i.shape
                 conc_i = np.reshape(conc_i, (-1, self.timesteps,
                                              self.features))
                 num_samples += conc_m.shape[0]
